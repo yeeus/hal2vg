@@ -15,6 +15,8 @@
 #include <fstream>
 #include <deque>
 #include <unordered_map>
+#include <chrono>
+#include <sstream>
 #if defined(__GLIBC__) && !defined(HAVE_JEMALLOC)
 #include <malloc.h>
 #endif
@@ -68,6 +70,31 @@ static inline uint32_t sequence_checksum(const string& seq) {
     return ((h >> 22) ^ h) & 0x3fffffu;
 }
 
+// VmRSS is current usage; VmHWM is the process high-water mark.  Keep diagnostics
+// on stderr because stdout is the serialized graph.  /proc is Linux-specific;
+// other platforms still report the stage and elapsed time, with memory unavailable.
+static void report_memory(const char* stage, const chrono::steady_clock::time_point& start) {
+    string rss = "unavailable", peak = "unavailable";
+#if defined(__linux__)
+    ifstream status("/proc/self/status");
+    string line;
+    while (getline(status, line)) {
+        istringstream field(line);
+        string name, value;
+        if (field >> name >> value) {
+            if (name == "VmRSS:") {
+                rss = value;
+            } else if (name == "VmHWM:") {
+                peak = value;
+            }
+        }
+    }
+#endif
+    auto elapsed = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - start).count();
+    cerr << "[hal2vg-memory] stage=" << stage << " elapsed_ms=" << elapsed
+         << " rss_kib=" << rss << " peak_rss_kib=" << peak << endl;
+}
+
 static void initParser(CLParser* optionsParser) {
     optionsParser->addArgument("halFile", "input hal file");
     optionsParser->addOption("refGenomes",
@@ -95,6 +122,9 @@ static void initParser(CLParser* optionsParser) {
                              0);
     optionsParser->addOptionFlag("progress",
                                  "show progress",
+                                 false);
+    optionsParser->addOptionFlag("keepPinchedGenomes",
+                                 "keep child genomes open after pinching (original behavior for memory comparisons)",
                                  false);
     optionsParser->setDescription("Convert HAL alignment to handle graph");
 
@@ -157,6 +187,7 @@ int main(int argc, char** argv) {
     string outputFormat;
     size_t maxNodeLength;
     bool progress;
+    bool keepPinchedGenomes;
     try {
         optionsParser.parseOptions(argc, argv);
         halPath = optionsParser.getArgument<string>("halFile");
@@ -176,14 +207,25 @@ int main(int argc, char** argv) {
         
         maxNodeLength = optionsParser.getOption<size_t>("chop");
         progress = optionsParser.getFlag("progress");
+        keepPinchedGenomes = optionsParser.getFlag("keepPinchedGenomes");
     }
     catch(exception& e) {
         cerr << e.what() << endl;
         optionsParser.printUsage(cerr);
         exit(1);
     }
+    const auto memoryStart = chrono::steady_clock::now();
+    auto memory = [&](const char* stage) {
+        if (progress) {
+            report_memory(stage, memoryStart);
+        }
+    };
     try {
+        if (progress) {
+            cerr << "[hal2vg-memory] keep_pinched_genomes=" << (keepPinchedGenomes ? 1 : 0) << endl;
+        }
         AlignmentConstPtr alignment(openHalAlignment(halPath, &optionsParser));
+        memory("after_open_hal");
         if (alignment->getNumGenomes() == 0) {
             throw hal_exception("input hal alignmenet is empty");
         }
@@ -348,6 +390,7 @@ int main(int argc, char** argv) {
         if (parentGenome != nullptr) {
             alignment->closeGenome(parentGenome);
         }
+        memory("after_adding_threads");
 
         // do all the pinching
         for (size_t i = 0; i < pinchGenomes.size(); ++i) {
@@ -356,22 +399,35 @@ int main(int argc, char** argv) {
             if (progress) {
                 cerr << "pinching " << pinchGenomes[i] << endl;
             }
-            pinch_genome(alignment->openGenome(pinchGenomes[i]), threadSet, nameToID);
+            const Genome* genome = alignment->openGenome(pinchGenomes[i]);
+            pinch_genome(genome, threadSet, nameToID);
+            if (!keepPinchedGenomes) {
+                alignment->closeGenome(genome);
+            }
         }
+        memory("after_pinching");
 
         // clean up the pinch graph
         if (progress) {
             cerr << "merging trivial segments and blocks in pinch graph" << endl;
         }
+        memory("before_join_1");
         stPinchThreadSet_joinTrivialBoundaries(threadSet);
+        memory("after_join_1");
 
         // the pinching above ran straight through mismatching bases, so blocks can hold more
         // than one base at a position.  separate them, then merge again: what is left is
         // blocks whose segments agree everywhere, which is what the graph needs
         vector<const Sequence*> IDToSequence;
+        memory("before_build_id");
         build_id_to_sequence(alignment, threadGenomes, nameToID, IDToSequence);
+        memory("after_build_id");
+        memory("before_split");
         split_blocks_by_base(threadSet, IDToSequence, progress);
+        memory("after_split");
+        memory("before_join_2");
         stPinchThreadSet_joinTrivialBoundaries(threadSet);
+        memory("after_join_2");
 
         // building the pinch graph leaves the heap littered with small free chunks that the
         // much bigger allocations made below cannot reuse.  consolidate them and give whole
@@ -382,6 +438,7 @@ int main(int argc, char** argv) {
 #endif
 
         // make a handle graph
+        memory("before_handle_graph");
         unique_ptr<MutablePathMutableHandleGraph> graph;
         if (outputFormat == "pg") {
             graph = unique_ptr<MutablePathMutableHandleGraph>(new PackedGraph());
@@ -432,11 +489,15 @@ int main(int argc, char** argv) {
             }
         }
 
+        memory("after_graph_conversion");
+
         // free the pinch graph
         stPinchThreadSet_destruct(threadSet);
+        memory("after_free_pinch_graph");
 
         // free the hal
         alignment = AlignmentConstPtr();
+        memory("after_close_hal");
 
         // chop
         if (maxNodeLength > 0) {
@@ -447,10 +508,12 @@ int main(int argc, char** argv) {
         }
 
         // write out the graph
+        memory("before_serialize");
         if (progress) {
             cerr << "serializing graph" << endl;
         }
         dynamic_cast<SerializableHandleGraph*>(graph.get())->serialize(cout);
+        memory("after_serialize");
     }
     catch(exception& e) {
         cerr << e.what() << endl;

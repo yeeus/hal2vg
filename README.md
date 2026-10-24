@@ -81,6 +81,42 @@ the ID-to-sequence lookup, base splitting, graph conversion, and serialization.
 The last boundary reached helps locate a failure; a rising high-water mark alone
 does not show whether the corresponding memory is still allocated.
 
+The memory lines also report `jemalloc_stats=ok` and `allocated_bytes`,
+`active_bytes`, `resident_bytes` after refreshing the allocator's statistics.
+These mean application allocations, active allocation pages, and allocator-resident
+memory respectively; allocator resident memory is not the same as process RSS.
+`jemalloc_stats=disabled` means a build without jemalloc; `unavailable` means the
+allocator could not supply statistics. Neither case is reported as zero usage.
+The diagnostics do not purge arenas or flush caches.
+
+Two `[hal2vg-pinch]` snapshots report live `threads`, `segments`, `terminators`
+and `blocks`: `pre_split`, and `before_graph_conversion` after the second join.
+Segment counts come from the library's per-thread counters; terminators are
+separate. The pre-split snapshot walks the blocks once (`scan_ms` includes that
+extra scan). The post-join block count reuses the existing node-id setup traversal,
+avoiding another full scan of the expanded graph. With jemalloc, sampled usable
+allocation sizes estimate `segment_storage_bytes`, `block_storage_bytes`, and
+their sum `core_usable_bytes`. Segment storage includes one terminator per thread.
+These estimates exclude thread indexes, allocator metadata, HAL and the output
+graph; they are not `sizeof` measurements or a complete pinch-graph memory total.
+
+### Update an existing build
+
+Only `hal2vg.cpp` is required for these diagnostics. Dependencies, submodule
+revisions, `Makefile` and `include.mk` are unchanged. From the existing checkout,
+in the same build environment as before:
+
+```bash
+git fetch origin master
+git checkout origin/master -- hal2vg.cpp
+make -j 16 hal2vg
+```
+
+This preserves local edits to other files and reuses the existing dependency
+builds. The updated README and tests are optional for running the executable.
+Keep `--progress` in the run command to enable the diagnostics, and use a new
+output directory such as `hal2vg_step2` to preserve the first experiment.
+
 ### Build on the cluster
 
 Use the compiler/HDF5 build environment from the existing Cactus installation.

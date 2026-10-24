@@ -17,6 +17,9 @@
 #include <unordered_map>
 #include <chrono>
 #include <sstream>
+#if defined(HAVE_JEMALLOC)
+#include "deps/jemalloc/include/jemalloc/jemalloc.h"
+#endif
 #if defined(__GLIBC__) && !defined(HAVE_JEMALLOC)
 #include <malloc.h>
 #endif
@@ -92,7 +95,76 @@ static void report_memory(const char* stage, const chrono::steady_clock::time_po
 #endif
     auto elapsed = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - start).count();
     cerr << "[hal2vg-memory] stage=" << stage << " elapsed_ms=" << elapsed
-         << " rss_kib=" << rss << " peak_rss_kib=" << peak << endl;
+         << " rss_kib=" << rss << " peak_rss_kib=" << peak;
+#if defined(HAVE_JEMALLOC)
+    uint64_t epoch = 1;
+    size_t epochSize = sizeof(epoch);
+    size_t allocated = 0, active = 0, resident = 0;
+    size_t allocatedSize = sizeof(allocated), activeSize = sizeof(active), residentSize = sizeof(resident);
+    bool statsAvailable = mallctl("epoch", &epoch, &epochSize, &epoch, sizeof(epoch)) == 0 &&
+        mallctl("stats.allocated", &allocated, &allocatedSize, NULL, 0) == 0 &&
+        mallctl("stats.active", &active, &activeSize, NULL, 0) == 0 &&
+        mallctl("stats.resident", &resident, &residentSize, NULL, 0) == 0;
+    if (statsAvailable) {
+        cerr << " jemalloc_stats=ok allocated_bytes=" << allocated
+             << " active_bytes=" << active << " resident_bytes=" << resident;
+    } else {
+        cerr << " jemalloc_stats=unavailable";
+    }
+#else
+    cerr << " jemalloc_stats=disabled";
+#endif
+    cerr << endl;
+}
+
+// Segment counts are maintained by pinchesAndCacti, so gathering them only
+// visits threads.  Count blocks once in the pre-split graph;
+// afterwards the caller reuses the block traversal needed for node-id setup.
+static void report_pinch_objects(const char* stage, stPinchThreadSet* threadSet,
+                                  int64_t blocks = -1, stPinchBlock* sampleBlock = nullptr) {
+    const auto start = chrono::steady_clock::now();
+    if (blocks < 0) {
+        cerr << "[hal2vg-pinch-scan] stage=" << stage << " counting_blocks=1" << endl;
+        blocks = 0;
+        stPinchThreadSetBlockIt blockIt = stPinchThreadSet_getBlockIt(threadSet);
+        for (stPinchBlock* block = stPinchThreadSetBlockIt_getNext(&blockIt); block != nullptr;
+             block = stPinchThreadSetBlockIt_getNext(&blockIt)) {
+            if (sampleBlock == nullptr) {
+                sampleBlock = block;
+            }
+            ++blocks;
+        }
+    }
+    uint64_t threads = 0, segments = 0;
+    stPinchSegment* sampleSegment = nullptr;
+    stPinchThreadSetIt threadIt = stPinchThreadSet_getIt(threadSet);
+    for (stPinchThread* thread = stPinchThreadSetIt_getNext(&threadIt); thread != nullptr;
+         thread = stPinchThreadSetIt_getNext(&threadIt)) {
+        ++threads;
+        segments += stPinchThread_getSegmentCount(thread);
+        if (sampleSegment == nullptr) {
+            sampleSegment = stPinchThread_getFirst(thread);
+        }
+    }
+    auto elapsed = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - start).count();
+    cerr << "[hal2vg-pinch] stage=" << stage << " threads=" << threads
+         << " segments=" << segments << " terminators=" << threads << " blocks=" << blocks
+         << " scan_ms=" << elapsed;
+#if defined(HAVE_JEMALLOC)
+    // Each type has a uniform allocation size. sallocx reports usable bytes,
+    // not sizeof or allocator metadata. Include the extra sentinel per thread;
+    // this core estimate excludes thread indexes, HAL, graph and other objects.
+    size_t segmentUsable = sampleSegment != nullptr ? sallocx(sampleSegment, 0) : 0;
+    size_t blockUsable = sampleBlock != nullptr ? sallocx(sampleBlock, 0) : 0;
+    uint64_t segmentBytes = (segments + threads) * segmentUsable;
+    uint64_t blockBytes = static_cast<uint64_t>(blocks) * blockUsable;
+    cerr << " segment_usable_bytes=" << segmentUsable << " block_usable_bytes=" << blockUsable
+         << " segment_storage_bytes=" << segmentBytes << " block_storage_bytes=" << blockBytes
+         << " core_usable_bytes=" << segmentBytes + blockBytes;
+#else
+    cerr << " core_usable_bytes=unavailable";
+#endif
+    cerr << endl;
 }
 
 static void initParser(CLParser* optionsParser) {
@@ -422,6 +494,9 @@ int main(int argc, char** argv) {
         memory("before_build_id");
         build_id_to_sequence(alignment, threadGenomes, nameToID, IDToSequence);
         memory("after_build_id");
+        if (progress) {
+            report_pinch_objects("pre_split", threadSet);
+        }
         memory("before_split");
         split_blocks_by_base(threadSet, IDToSequence, progress);
         memory("after_split");
@@ -452,11 +527,21 @@ int main(int argc, char** argv) {
         // table would cost some 48 bytes for every node in the output, so the id is parked
         // in the block's supporting-homology count instead, which nothing needs any more now
         // that pinching is done.  zero it first so that 0 means "not converted yet"
+        int64_t blockCount = 0;
+        stPinchBlock* sampleBlock = nullptr;
         stPinchThreadSetBlockIt blockIt = stPinchThreadSet_getBlockIt(threadSet);
         for (stPinchBlock* block = stPinchThreadSetBlockIt_getNext(&blockIt); block != NULL;
              block = stPinchThreadSetBlockIt_getNext(&blockIt)) {
             stPinchBlock_setNumSupportingHomologies(block, 0);
+            if (sampleBlock == nullptr) {
+                sampleBlock = block;
+            }
+            ++blockCount;
         }
+        if (progress) {
+            report_pinch_objects("before_graph_conversion", threadSet, blockCount, sampleBlock);
+        }
+        memory("before_graph_conversion");
 
         // start iterating over the genomes again in order to export to handle graph
         queue = {rootGenomeName};

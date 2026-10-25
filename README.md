@@ -57,6 +57,15 @@ hal2vg input.hal --inMemory --chop 32 --progress > output.pg
 
 **Note**: The output graph is only readable by vg version 1.24.0 and greater.
 
+## Low-memory conversion
+
+`--lowMemory` builds the output from compact, bit-packed base-group plans instead
+of materializing the expanded pinch graph. It uses bounded DNA windows, releases
+cohort HAL arrays before output conversion, and does not spool paths to disk.
+The original conversion remains the default for comparison. See
+[LOW_MEMORY.md](LOW_MEMORY.md) for updating an existing build, generated small-HAL
+tests, a regional subset helper, and the full-chromosome test command.
+
 ## Genome-lifetime memory experiment
 
 This fork closes each child genome after `pinch_genome()` returns. `--inMemory`
@@ -90,7 +99,8 @@ allocator could not supply statistics. Neither case is reported as zero usage.
 The diagnostics do not purge arenas or flush caches.
 
 Two `[hal2vg-pinch]` snapshots report live `threads`, `segments`, `terminators`
-and `blocks`: `pre_split`, and `before_graph_conversion` after the second join.
+and `blocks`: `pre_split`, and `before_graph_conversion` (after the second join
+in the original mode; after compact planning in low-memory mode).
 Segment counts come from the library's per-thread counters; terminators are
 separate. The pre-split snapshot walks the blocks once (`scan_ms` includes that
 extra scan). The post-join block count reuses the existing node-id setup traversal,
@@ -102,18 +112,18 @@ graph; they are not `sizeof` measurements or a complete pinch-graph memory total
 
 ### Update an existing build
 
-Only `hal2vg.cpp` is required for these diagnostics. Dependencies, submodule
-revisions, `Makefile` and `include.mk` are unchanged. From the existing checkout,
+Running the current version needs `hal2vg.cpp` and `low_memory_plan.hpp`.
+Dependency and submodule revisions are unchanged. From the existing checkout,
 in the same build environment as before:
 
 ```bash
 git fetch origin master
-git checkout origin/master -- hal2vg.cpp
+git checkout origin/master -- hal2vg.cpp low_memory_plan.hpp
 make -j 16 hal2vg
 ```
 
 This preserves local edits to other files and reuses the existing dependency
-builds. The updated README and tests are optional for running the executable.
+builds. Updated documentation and tests are optional for running the executable.
 Keep `--progress` in the run command to enable the diagnostics, and use a new
 output directory such as `hal2vg_step2` to preserve the first experiment.
 
@@ -121,7 +131,7 @@ output directory such as `hal2vg_step2` to preserve the first experiment.
 
 Use the compiler/HDF5 build environment from the existing Cactus installation.
 The build requires a C++20-capable compiler, `h5c++`/HDF5 development files,
-autoconf for jemalloc, and the lz4, zstd and jansson development
+autoconf for jemalloc, Boost headers, and the lz4, zstd and jansson development
 libraries. No change to the installed Cactus executable is needed for this test.
 
 ```bash

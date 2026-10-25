@@ -107,6 +107,10 @@ grep -E '\[hal2vg-(memory|pinch|low-memory)\]' ./hal2vg_low_memory/chr21.log
 
 重点看 `after_low_memory_planning`、`after_low_memory_hal_release`、`after_graph_conversion` 及 GNU time 的最大 RSS。完成图有效性、路径和下游验证后，再用于 chr2/chr1。
 
+输出完成后，用 [VERIFY_FULL_GRAPH.md](VERIFY_FULL_GRAPH.md) 中的独立工具对完整原版/低内存图比较。
+它检查全部路径序列、同源共享关系和方向，以及节点/边覆盖；不要求节点编号或线性切分相同。
+不要把小型测试中的整图 JSON 逐碱基展开方法用于完整染色体。
+
 ## 外部证据
 
 - [外部搜索：原 split 实现](https://github.com/yeeus/hal2vg/blob/bab3a85faeb6cf35b25bc898b7deea95d6572ee3/hal2vg.cpp#L773-L878)：碱基分组和重新 pinching。

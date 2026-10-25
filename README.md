@@ -66,6 +66,10 @@ The original conversion remains the default for comparison. See
 [LOW_MEMORY.md](LOW_MEMORY.md) for updating an existing build, generated small-HAL
 tests, a regional subset helper, and the full-chromosome test command.
 
+For a full-output comparison that tolerates node renumbering and linear cuts,
+see [VERIFY_FULL_GRAPH.md](VERIFY_FULL_GRAPH.md). Its independent verifier checks
+all path sequences, oriented base-level homology, and complete node/edge coverage.
+
 ## Genome-lifetime memory experiment
 
 This fork closes each child genome after `pinch_genome()` returns. `--inMemory`
